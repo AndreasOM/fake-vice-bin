@@ -3,6 +3,14 @@ name = "fake-vice-bin"
 version = "0.1.0"
 edition = "2021"
 
+description = "Very simple wrapped to handle remote monitoring of VICE via the binary interface."
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/AndreasOM/fake-vice-bin"
+repository = "https://github.com/AndreasOM/fake-vice-bin"
+keywords = ["c64", "vice", "monitor", "debugging", "command-line"]
+categories = ["command-line-utilities"]
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [[bin]]
