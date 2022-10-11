@@ -1,6 +1,4 @@
-use core::mem::MaybeUninit;
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::io::Read;
 use std::io::Write;
 use std::net::IpAddr;
@@ -8,6 +6,8 @@ use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use ringbuf::consumer::Consumer;
 use ringbuf::producer::Producer;
@@ -44,7 +44,7 @@ impl Register {
 //#[derive(Debug)]
 pub struct FakeViceBin {
 	socket_addr:     SocketAddr,
-	stream:          Option<TcpStream>,
+	//stream:          Option<TcpStream>,
 	resets_pending:  usize,
 	load_pending:    bool,
 	next_request_id: u32,
@@ -54,6 +54,8 @@ pub struct FakeViceBin {
 
 	response_rb_prod: Option<Producer<u8, Arc<HeapRb<u8>>>>,
 	response_rb_cons: Option<Consumer<u8, Arc<HeapRb<u8>>>>,
+	request_rb_prod:  Option<Producer<u8, Arc<HeapRb<u8>>>>,
+	request_rb_cons:  Option<Consumer<u8, Arc<HeapRb<u8>>>>,
 	connected:        bool,
 }
 
@@ -62,7 +64,7 @@ impl FakeViceBin {
 		let ip: IpAddr = IpAddr::from_str(host).expect("...");
 		Self {
 			socket_addr:      (ip, port).into(),
-			stream:           None,
+			//stream:           None,
 			//response_buffer: VecDeque::new(),
 			resets_pending:   0,
 			load_pending:     false,
@@ -72,21 +74,95 @@ impl FakeViceBin {
 			registers:        HashMap::default(),
 			response_rb_prod: None, //prod,
 			response_rb_cons: None, //cons,
+			request_rb_prod:  None,
+			request_rb_cons:  None,
 			connected:        false,
 		}
 	}
 
 	pub fn connect(&mut self) -> anyhow::Result<()> {
+		if self.connected {
+			anyhow::bail!("Already connected!");
+		}
 		match TcpStream::connect(self.socket_addr) {
-			Ok(stream) => {
+			Ok(mut stream) => {
 				stream.set_nonblocking(true)?;
-				self.stream = Some(stream);
+				//self.stream = Some(stream);
+
 				let rb = HeapRb::<u8>::new(64 * 1024); // this should be more than plenty, well, it's too large, but I have a plan
 				let (prod, cons) = rb.split();
 				self.response_rb_prod = Some(prod);
 				self.response_rb_cons = Some(cons);
 
+				let rb = HeapRb::<u8>::new(64 * 1024); // this should be more than plenty, well, it's too large, but I have a plan
+				let (prod, cons) = rb.split();
+				self.request_rb_prod = Some(prod);
+				self.request_rb_cons = Some(cons);
+
 				self.connected = true;
+
+				let mut response_rb_prod = self.response_rb_prod.take();
+				let mut request_rb_cons = self.request_rb_cons.take();
+
+				let socket_addr = self.socket_addr.to_string();
+				thread::spawn(move || -> anyhow::Result<()> {
+					let delay = std::time::Duration::from_millis(5);
+					loop {
+						// receive
+						let mut buf = [0; 1];
+						loop {
+							let _size = match stream.read(&mut buf) {
+								Ok(size) => {
+									//println!("Read {} bytes from stream", size);
+									size
+								},
+								Err(ref e) => {
+									match e.kind() {
+										std::io::ErrorKind::WouldBlock => {
+											//println!("No updates");
+											break;
+										},
+										e => {
+											anyhow::bail!(
+												"Error reading from to {}: {}",
+												&socket_addr,
+												e
+											);
+										},
+									}
+								},
+							};
+
+							if let Some(response_rb_prod) = &mut response_rb_prod {
+								for b in buf.iter() {
+									match response_rb_prod.push(*b) {
+										Ok(()) => {},
+										Err(e) => {
+											anyhow::bail!("Error storing response {}", e);
+										},
+									}
+								}
+							}
+						}
+						// println!("Read {} bytes in update", self.response_buffer.len() );
+
+						// send
+						//stream.write(buffer)?;
+						if let Some(request_rb_cons) = &mut request_rb_cons {
+							let len = request_rb_cons.len();
+							if len > 0 {
+								let mut buffer_vec = Vec::with_capacity(len);
+								buffer_vec.resize(len, 0);
+								let mut buffer = &mut buffer_vec[0..len];
+								let l = request_rb_cons.pop_slice(&mut buffer);
+								println!("Got {} bytes from ringbuffer for sending", l);
+								stream.write(buffer)?;
+							}
+						};
+						thread::sleep(delay);
+					}
+					Ok(())
+				});
 				Ok(())
 			},
 			Err(e) => {
@@ -95,6 +171,10 @@ impl FakeViceBin {
 		}
 	}
 	pub fn disconnect(&mut self) -> anyhow::Result<()> {
+		Ok(())
+
+		// :TODO:
+		/*
 		if let Some(stream) = &mut self.stream.take() {
 			stream.shutdown(std::net::Shutdown::Both)?;
 			self.response_rb_prod = None;
@@ -105,6 +185,7 @@ impl FakeViceBin {
 		} else {
 			Ok(())
 		}
+		*/
 	}
 
 	pub fn is_reset_pending(&self) -> bool {
@@ -149,11 +230,18 @@ impl FakeViceBin {
 	}
 
 	fn send_buffer(&mut self, buffer: &[u8]) -> anyhow::Result<()> {
-		if let Some(stream) = &mut self.stream {
-			stream.write(buffer)?;
+		if let Some(request_rb_prod) = &mut self.request_rb_prod {
+			for b in buffer.iter() {
+				match request_rb_prod.push(*b) {
+					Ok(()) => {},
+					Err(e) => {
+						anyhow::bail!("Error storing request {}", e);
+					},
+				}
+			}
 			Ok(())
 		} else {
-			anyhow::bail!("No stream when trying to send");
+			anyhow::bail!("No buffer when trying to send");
 		}
 	}
 
@@ -164,6 +252,9 @@ impl FakeViceBin {
 				let mut header_buffer = [0u8; 12];
 				let l = response_buffer_cons.pop_slice(&mut header_buffer);
 				println!("Got {} bytes from ringbuffer for header", l);
+				if l != 12 {
+					anyhow::bail!("Short header {} != 12", l);
+				}
 				//let header_buffer = self.response_buffer.drain(0..12).collect::<Vec<_>>();
 				let buffer = &header_buffer;
 				for b in buffer.iter() {
@@ -197,20 +288,20 @@ impl FakeViceBin {
 					request_id <<= 8;
 					request_id |= *b as usize;
 				}
-				//println!("request id: {:?} -> {:#04x}", id, request_id);
-				//let body_len_actual = buffer.len() - 12;
-				//println!("body length {} == {}", body_len_actual, body_len);
-				/*
-				let response_id = buffer[ 12 ];
-				println!("response_id: {:#02x}", response_id);
-				*/
 				let mut body_vec = Vec::with_capacity(body_len);
 				body_vec.resize(body_len, 0);
 				let mut body_buffer = &mut body_vec[0..body_len]; //body_vec.as_slice();
+				while body_len > response_buffer_cons.len() {
+					print!(".");
+					let short_delay = std::time::Duration::from_millis(1);
+					std::thread::sleep(short_delay);
+				}
 				let l = response_buffer_cons.pop_slice(&mut body_buffer);
-				println!("Got {} bytes from ringbuffer for body", l);
+				println!("Got {} bytes from ringbuffer for body (Response Type: {:#04x}, Error Code: {:#04x})", l, response_type, error_code);
+				if l != body_len {
+					anyhow::bail!("Short body {} != {}", l, body_len);
+				}
 
-				//let body_buffer = self.response_buffer.drain(0..body_len).collect::<Vec<_>>();
 				let buffer = &body_buffer;
 				match response_type {
 					0x31 => {
@@ -348,41 +439,7 @@ impl FakeViceBin {
 
 	pub fn update(&mut self) -> anyhow::Result<()> {
 		println!("{} {:?}", &self.resets_pending, self.load_pending);
-		if let Some(stream) = &mut self.stream {
-			let mut buf = [0; 1];
-			//			let mut buf = Vec::with_capacity( 100 );
-			// match stream.read_to_end( &mut buf ) {
-			loop {
-				let _size = match stream.read(&mut buf) {
-					Ok(size) => {
-						//println!("Read {} bytes from stream", size);
-						size
-					},
-					Err(ref e) => {
-						match e.kind() {
-							std::io::ErrorKind::WouldBlock => {
-								//println!("No updates");
-								break;
-							},
-							e => {
-								anyhow::bail!("Error reading from to {}: {}", &self.socket_addr, e);
-							},
-						}
-					},
-				};
-
-				if let Some(response_buffer_prod) = &mut self.response_rb_prod {
-					for b in buf.iter() {
-						match response_buffer_prod.push(*b) {
-							Ok(()) => {},
-							Err(e) => {
-								anyhow::bail!("Error storing response {}", e);
-							},
-						}
-					}
-				}
-			}
-			// println!("Read {} bytes in update", self.response_buffer.len() );
+		if self.connected {
 			loop {
 				let l = if let Some(response_buffer_cons) = &mut self.response_rb_cons {
 					response_buffer_cons.len()
@@ -395,15 +452,10 @@ impl FakeViceBin {
 					break;
 				}
 			}
-			/*
-			while self.response_buffer.len() >= 12 {
-				self.handle_response()?;
-			}
-			*/
 
 			Ok(())
 		} else {
-			anyhow::bail!("No stream to read update");
+			anyhow::bail!("Not connected to read update");
 		}
 	}
 

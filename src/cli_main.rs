@@ -46,13 +46,13 @@ fn main() -> anyhow::Result<()> {
 		}
 	*/
 	//	fvb.connect()?;
-	//	loop {
-	fvb.send_advance_instructions(1000)?;
-	//fvb.send_ping()?;
-	//fvb.send_exit()?;
-	fvb.update()?;
-	std::thread::sleep(short_delay);
-	//	}
+	loop {
+		fvb.send_advance_instructions(1000)?;
+		//fvb.send_ping()?;
+		//fvb.send_exit()?;
+		fvb.update()?;
+		std::thread::sleep(short_delay);
+	}
 	loop {
 		fvb.update()?;
 		//fvb.send_ping()?;

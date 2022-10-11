@@ -2,7 +2,6 @@
 
 ## In Progress
 
-- [ ] Move sending and receiving to seperate thread
 
 ## TODO
 
@@ -10,6 +9,8 @@
 - [ ] Move header information into header struct
 
 ## Done
+
+- [x] Move sending and receiving to seperate thread
 
 ## Released
 
