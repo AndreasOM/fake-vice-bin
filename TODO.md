@@ -10,9 +10,11 @@
 
 ## Done
 
-- [x] Move sending and receiving to seperate thread
 
 ## Released
+
+### v0.1.1 - 2022-10-11
+- [x] Move sending and receiving to seperate thread
 
 ### v0.1.0 - 2022-10-10
 - [x] Initial proof-of-concept
