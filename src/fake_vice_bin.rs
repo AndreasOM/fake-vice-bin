@@ -147,7 +147,6 @@ impl FakeViceBin {
 	fn send_buffer(&mut self, buffer: &[u8]) -> anyhow::Result<()> {
 		if let Some(stream) = &mut self.stream {
 			stream.write(buffer)?;
-			self.resets_pending += 1;
 			Ok(())
 		} else {
 			anyhow::bail!("No stream when trying to send");
@@ -462,6 +461,7 @@ impl FakeViceBin {
 			body.push(0x01); // 0x01 -> hard reset
 
 			let buf = self.build_command(0xcc, body);
+			self.resets_pending += 1;
 			self.send_buffer(&buf)
 		} else {
 			anyhow::bail!("No stream to send reset");
