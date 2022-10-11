@@ -19,3 +19,4 @@ path="src/cli_main.rs"
 
 [dependencies]
 anyhow = "1.0.65"
+ringbuf = "0.3.0"

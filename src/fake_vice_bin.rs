@@ -1,3 +1,4 @@
+use core::mem::MaybeUninit;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io::Read;
@@ -6,6 +7,11 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::str::FromStr;
+use std::sync::Arc;
+
+use ringbuf::consumer::Consumer;
+use ringbuf::producer::Producer;
+use ringbuf::SharedRb;
 
 #[derive(Debug, Default)]
 pub struct Register {
@@ -35,32 +41,37 @@ impl Register {
 	}
 }
 
-#[derive(Debug)]
+//#[derive(Debug)]
 pub struct FakeViceBin {
 	socket_addr:     SocketAddr,
 	stream:          Option<TcpStream>,
-	response_buffer: VecDeque<u8>,
+	//response_buffer: VecDeque<u8>,
 	resets_pending:  usize,
 	load_pending:    bool,
 	next_request_id: u32,
 	running:         bool,
 	program_counter: u16,
 	registers:       HashMap<u8, Register>,
+
+	response_rb_prod: Option<Producer<u8, Arc<SharedRb<u8, Vec<MaybeUninit<u8>>>>>>,
+	response_rb_cons: Option<Consumer<u8, Arc<SharedRb<u8, Vec<MaybeUninit<u8>>>>>>,
 }
 
 impl FakeViceBin {
 	pub fn new(host: &str, port: u16) -> Self {
 		let ip: IpAddr = IpAddr::from_str(host).expect("...");
 		Self {
-			socket_addr:     (ip, port).into(),
-			stream:          None,
-			response_buffer: VecDeque::new(),
-			resets_pending:  0,
-			load_pending:    false,
-			next_request_id: 0,
-			running:         true,
-			program_counter: 0,
-			registers:       HashMap::default(),
+			socket_addr:      (ip, port).into(),
+			stream:           None,
+			//response_buffer: VecDeque::new(),
+			resets_pending:   0,
+			load_pending:     false,
+			next_request_id:  0,
+			running:          true,
+			program_counter:  0,
+			registers:        HashMap::default(),
+			response_rb_prod: None, //prod,
+			response_rb_cons: None, //cons,
 		}
 	}
 
@@ -69,6 +80,11 @@ impl FakeViceBin {
 			Ok(stream) => {
 				stream.set_nonblocking(true)?;
 				self.stream = Some(stream);
+				let rb = SharedRb::<u8, Vec<_>>::new(64 * 1024); // this should be more than plenty, well, it's too large, but I have a plan
+				let (prod, cons) = rb.split();
+				self.response_rb_prod = Some(prod);
+				self.response_rb_cons = Some(cons);
+
 				Ok(())
 			},
 			Err(e) => {
@@ -79,6 +95,8 @@ impl FakeViceBin {
 	pub fn disconnect(&mut self) -> anyhow::Result<()> {
 		if let Some(stream) = &mut self.stream.take() {
 			stream.shutdown(std::net::Shutdown::Both)?;
+			self.response_rb_prod = None;
+			self.response_rb_cons = None;
 			Ok(())
 		} else {
 			Ok(())
@@ -127,176 +145,188 @@ impl FakeViceBin {
 	}
 
 	fn handle_response(&mut self) -> anyhow::Result<()> {
-		if self.response_buffer.len() >= 12 {
-			let header_buffer = self.response_buffer.drain(0..12).collect::<Vec<_>>();
-			let buffer = &header_buffer;
-			for b in buffer.iter() {
-				print!("{:#02x} ", b);
-			}
-			println!("");
-			// parse update
-			let stx = buffer[0];
-			if stx != 0x02 {
-				anyhow::bail!("Response started with {}", stx);
-			}
-			let version = buffer[1];
-			if version != 0x02 {
-				anyhow::bail!("Version {} not supported", version);
-			}
-			let len = [buffer[5], buffer[4], buffer[3], buffer[2]];
-			let mut body_len = 0;
-			for b in len.iter() {
-				body_len <<= 8;
-				body_len |= *b as usize;
-			}
-			//println!("Body Length: {:?} -> {}", len, body_len);
-			let response_type = buffer[6];
-			//println!("Response type: {:#02x}", response_type);
-			let error_code = buffer[7];
-			//println!("Error code: {:#02x}", error_code);
+		if let Some(response_buffer_cons) = &mut self.response_rb_cons {
+			// occupied_len
+			if response_buffer_cons.len() >= 12 {
+				let mut header_buffer = [0u8; 12];
+				let l = response_buffer_cons.pop_slice(&mut header_buffer);
+				println!("Got {} bytes from ringbuffer for header", l);
+				//let header_buffer = self.response_buffer.drain(0..12).collect::<Vec<_>>();
+				let buffer = &header_buffer;
+				for b in buffer.iter() {
+					print!("{:#02x} ", b);
+				}
+				println!("");
+				// parse update
+				let stx = buffer[0];
+				if stx != 0x02 {
+					anyhow::bail!("Response started with {}", stx);
+				}
+				let version = buffer[1];
+				if version != 0x02 {
+					anyhow::bail!("Version {} not supported", version);
+				}
+				let len = [buffer[5], buffer[4], buffer[3], buffer[2]];
+				let mut body_len = 0;
+				for b in len.iter() {
+					body_len <<= 8;
+					body_len |= *b as usize;
+				}
+				//println!("Body Length: {:?} -> {}", len, body_len);
+				let response_type = buffer[6];
+				//println!("Response type: {:#02x}", response_type);
+				let error_code = buffer[7];
+				//println!("Error code: {:#02x}", error_code);
 
-			let id = [buffer[11], buffer[10], buffer[9], buffer[8]];
-			let mut request_id = 0;
-			for b in id.iter() {
-				request_id <<= 8;
-				request_id |= *b as usize;
-			}
-			//println!("request id: {:?} -> {:#04x}", id, request_id);
-			//let body_len_actual = buffer.len() - 12;
-			//println!("body length {} == {}", body_len_actual, body_len);
-			/*
-			let response_id = buffer[ 12 ];
-			println!("response_id: {:#02x}", response_id);
-			*/
-			let body_buffer = self.response_buffer.drain(0..body_len).collect::<Vec<_>>();
-			let buffer = &body_buffer;
-			match response_type {
-				0x31 => {
-					// registers get
-					let c = [buffer[1], buffer[0]];
-					let mut count = 0;
-					for b in c.iter() {
-						count <<= 8;
-						count |= *b as u16;
-					}
-					//println!("Count {}", count);
-					let mut entry_start = 2;
-					for e in 0..count {
-						let size = buffer[entry_start];
-						let id = buffer[entry_start + 1];
-						let value = ((buffer[entry_start + 3] as u16) << 8)
-							| (buffer[entry_start + 2] as u16);
+				let id = [buffer[11], buffer[10], buffer[9], buffer[8]];
+				let mut request_id = 0;
+				for b in id.iter() {
+					request_id <<= 8;
+					request_id |= *b as usize;
+				}
+				//println!("request id: {:?} -> {:#04x}", id, request_id);
+				//let body_len_actual = buffer.len() - 12;
+				//println!("body length {} == {}", body_len_actual, body_len);
+				/*
+				let response_id = buffer[ 12 ];
+				println!("response_id: {:#02x}", response_id);
+				*/
+				let mut body_vec = Vec::with_capacity(body_len);
+				body_vec.resize(body_len, 0);
+				let mut body_buffer = &mut body_vec[0..body_len]; //body_vec.as_slice();
+				let l = response_buffer_cons.pop_slice(&mut body_buffer);
+				println!("Got {} bytes from ringbuffer for body", l);
 
-						let r = self
-							.registers
-							.entry(id)
-							.or_insert_with(|| Register::default());
-						println!(
-							"{:#02} | {:#04x} {:#04x} {:#06x} | {}",
-							e,
-							size,
-							id,
-							value,
-							r.name()
-						);
-						r.set_value(value);
-						entry_start += 4;
-					}
-				},
-				0x62 => {
-					// stopped
-					let c = [buffer[1], buffer[0]];
-					let mut pc = 0;
-					for b in c.iter() {
-						pc <<= 8;
-						pc |= *b as u16;
-					}
-					self.running = false;
-					self.program_counter = pc;
-					//println!("stopped PC {:#06x}", pc);
-				},
-				0x63 => {
-					// resumed
-					let c = [buffer[1], buffer[0]];
-					let mut pc = 0;
-					for b in c.iter() {
-						pc <<= 8;
-						pc |= *b as u16;
-					}
-					self.running = true;
-					self.program_counter = pc;
-					//println!("resumed PC {:#06x}", pc);
-				},
-				0x71 => { // advance instructions
-				},
-				0x81 => { // ping
-				},
-				0x83 => {
-					// registers available
-					println!("Body for 0x83 - registers available");
-					for b in buffer.iter() {
-						print!("{:#02x} ", b);
-					}
-					println!("");
-
-					/*
-					byte 0-1: The count of the array items
-					byte 2+: An array with items of structure:
-
-					byte 0: Size of the item, excluding this byte
-					byte 1: ID of the register
-					byte 2: Size of the register in bits
-					byte 3: Length of name
-					byte 4+: Name
-										*/
-
-					let count = (buffer[1] as u16) << 8 | (buffer[0] as u16);
-					println!("Entry count {}", count);
-
-					let mut entry_start = 2;
-					for e in 0..count {
-						let size = buffer[entry_start] as usize;
-						let id = buffer[entry_start + 1];
-						let r_size = buffer[entry_start + 2];
-						let len = buffer[entry_start + 3] as usize;
-						let mut name = Vec::new();
-						for i in 0..=len {
-							name.push(buffer[entry_start + 3 + i])
+				//let body_buffer = self.response_buffer.drain(0..body_len).collect::<Vec<_>>();
+				let buffer = &body_buffer;
+				match response_type {
+					0x31 => {
+						// registers get
+						let c = [buffer[1], buffer[0]];
+						let mut count = 0;
+						for b in c.iter() {
+							count <<= 8;
+							count |= *b as u16;
 						}
+						//println!("Count {}", count);
+						let mut entry_start = 2;
+						for e in 0..count {
+							let size = buffer[entry_start];
+							let id = buffer[entry_start + 1];
+							let value = ((buffer[entry_start + 3] as u16) << 8)
+								| (buffer[entry_start + 2] as u16);
 
-						let name = std::str::from_utf8(&name)?;
+							let r = self
+								.registers
+								.entry(id)
+								.or_insert_with(|| Register::default());
+							println!(
+								"{:#02} | {:#04x} {:#04x} {:#06x} | {}",
+								e,
+								size,
+								id,
+								value,
+								r.name()
+							);
+							r.set_value(value);
+							entry_start += 4;
+						}
+					},
+					0x62 => {
+						// stopped
+						let c = [buffer[1], buffer[0]];
+						let mut pc = 0;
+						for b in c.iter() {
+							pc <<= 8;
+							pc |= *b as u16;
+						}
+						self.running = false;
+						self.program_counter = pc;
+						//println!("stopped PC {:#06x}", pc);
+					},
+					0x63 => {
+						// resumed
+						let c = [buffer[1], buffer[0]];
+						let mut pc = 0;
+						for b in c.iter() {
+							pc <<= 8;
+							pc |= *b as u16;
+						}
+						self.running = true;
+						self.program_counter = pc;
+						//println!("resumed PC {:#06x}", pc);
+					},
+					0x71 => { // advance instructions
+					},
+					0x81 => { // ping
+					},
+					0x83 => {
+						// registers available
+						println!("Body for 0x83 - registers available");
+						for b in buffer.iter() {
+							print!("{:#02x} ", b);
+						}
+						println!("");
 
-						println!(
-							"{:#02} | {:#04x} {:#04x} {:#04x} -> {}",
-							e, size, id, r_size, name
-						);
-						let r = self
-							.registers
-							.entry(id)
-							.or_insert_with(|| Register::default());
-						r.set_name(name);
-						r.set_size(r_size);
-						entry_start += size + 1;
-					}
-				},
-				0xaa => { // exit
-				},
-				0xcc => {
-					// reset
-					println!("Handled reset");
-					self.resets_pending -= 1;
-				},
-				o => match error_code {
-					0x80 => {
-						println!("Invalid command length for {:#010x}", request_id);
+						/*
+						byte 0-1: The count of the array items
+						byte 2+: An array with items of structure:
+
+						byte 0: Size of the item, excluding this byte
+						byte 1: ID of the register
+						byte 2: Size of the register in bits
+						byte 3: Length of name
+						byte 4+: Name
+											*/
+
+						let count = (buffer[1] as u16) << 8 | (buffer[0] as u16);
+						println!("Entry count {}", count);
+
+						let mut entry_start = 2;
+						for e in 0..count {
+							let size = buffer[entry_start] as usize;
+							let id = buffer[entry_start + 1];
+							let r_size = buffer[entry_start + 2];
+							let len = buffer[entry_start + 3] as usize;
+							let mut name = Vec::new();
+							for i in 0..=len {
+								name.push(buffer[entry_start + 3 + i])
+							}
+
+							let name = std::str::from_utf8(&name)?;
+
+							println!(
+								"{:#02} | {:#04x} {:#04x} {:#04x} -> {}",
+								e, size, id, r_size, name
+							);
+							let r = self
+								.registers
+								.entry(id)
+								.or_insert_with(|| Register::default());
+							r.set_name(name);
+							r.set_size(r_size);
+							entry_start += size + 1;
+						}
 					},
-					ec => {
-						println!(
-							"Unhandled response type {:#04x} (error code: {:#04x})",
-							o, ec
-						);
+					0xaa => { // exit
 					},
-				},
+					0xcc => {
+						// reset
+						println!("Handled reset");
+						self.resets_pending -= 1;
+					},
+					o => match error_code {
+						0x80 => {
+							println!("Invalid command length for {:#010x}", request_id);
+						},
+						ec => {
+							println!(
+								"Unhandled response type {:#04x} (error code: {:#04x})",
+								o, ec
+							);
+						},
+					},
+				}
 			}
 		}
 
@@ -328,14 +358,30 @@ impl FakeViceBin {
 					},
 				};
 
-				for b in buf.iter() {
-					self.response_buffer.push_back(*b);
+				if let Some(response_buffer_prod) = &mut self.response_rb_prod {
+					for b in buf.iter() {
+						response_buffer_prod.push(*b);
+					}
 				}
 			}
 			// println!("Read {} bytes in update", self.response_buffer.len() );
+			loop {
+				let l = if let Some(response_buffer_cons) = &mut self.response_rb_cons {
+					response_buffer_cons.len()
+				} else {
+					0
+				};
+				if l >= 12 {
+					self.handle_response()?;
+				} else {
+					break;
+				}
+			}
+			/*
 			while self.response_buffer.len() >= 12 {
 				self.handle_response()?;
 			}
+			*/
 
 			Ok(())
 		} else {
