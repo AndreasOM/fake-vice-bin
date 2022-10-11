@@ -45,7 +45,6 @@ impl Register {
 pub struct FakeViceBin {
 	socket_addr:     SocketAddr,
 	stream:          Option<TcpStream>,
-	//response_buffer: VecDeque<u8>,
 	resets_pending:  usize,
 	load_pending:    bool,
 	next_request_id: u32,
@@ -55,6 +54,7 @@ pub struct FakeViceBin {
 
 	response_rb_prod: Option<Producer<u8, Arc<HeapRb<u8>>>>,
 	response_rb_cons: Option<Consumer<u8, Arc<HeapRb<u8>>>>,
+	connected:        bool,
 }
 
 impl FakeViceBin {
@@ -72,6 +72,7 @@ impl FakeViceBin {
 			registers:        HashMap::default(),
 			response_rb_prod: None, //prod,
 			response_rb_cons: None, //cons,
+			connected:        false,
 		}
 	}
 
@@ -85,6 +86,7 @@ impl FakeViceBin {
 				self.response_rb_prod = Some(prod);
 				self.response_rb_cons = Some(cons);
 
+				self.connected = true;
 				Ok(())
 			},
 			Err(e) => {
@@ -97,6 +99,8 @@ impl FakeViceBin {
 			stream.shutdown(std::net::Shutdown::Both)?;
 			self.response_rb_prod = None;
 			self.response_rb_cons = None;
+
+			self.connected = false;
 			Ok(())
 		} else {
 			Ok(())
@@ -404,7 +408,7 @@ impl FakeViceBin {
 	}
 
 	pub fn send_ping(&mut self) -> anyhow::Result<()> {
-		if self.stream.is_some() {
+		if self.connected {
 			let mut buf = Vec::new();
 
 			buf.push(0x02); // STX
@@ -425,12 +429,12 @@ impl FakeViceBin {
 
 			self.send_buffer(&buf)
 		} else {
-			anyhow::bail!("No stream to send ping");
+			anyhow::bail!("Not connected to send ping");
 		}
 	}
 
 	pub fn send_exit(&mut self) -> anyhow::Result<()> {
-		if self.stream.is_some() {
+		if self.connected {
 			let mut buf = Vec::new();
 
 			buf.push(0x02); // STX
@@ -451,12 +455,12 @@ impl FakeViceBin {
 
 			self.send_buffer(&buf)
 		} else {
-			anyhow::bail!("No stream to send exit");
+			anyhow::bail!("Not connected to send exit");
 		}
 	}
 
 	pub fn send_reset(&mut self) -> anyhow::Result<()> {
-		if self.stream.is_some() {
+		if self.connected {
 			let mut body = Vec::new();
 			body.push(0x01); // 0x01 -> hard reset
 
@@ -464,11 +468,11 @@ impl FakeViceBin {
 			self.resets_pending += 1;
 			self.send_buffer(&buf)
 		} else {
-			anyhow::bail!("No stream to send reset");
+			anyhow::bail!("Not connected to send reset");
 		}
 	}
 	pub fn send_load(&mut self, filename: &str, autostart: bool) -> anyhow::Result<()> {
-		if self.stream.is_some() {
+		if self.connected {
 			let filename_bytes: &[u8] = filename.as_bytes();
 			// :TODO: ascii cleanup/check
 			let filename_len = filename_bytes.len();
@@ -491,22 +495,22 @@ impl FakeViceBin {
 			let buf = self.build_command(0xdd, body);
 			self.send_buffer(&buf)
 		} else {
-			anyhow::bail!("No stream to send load");
+			anyhow::bail!("Not connected to send load");
 		}
 	}
 	pub fn send_registers_available(&mut self, memspace: u8) -> anyhow::Result<()> {
-		if self.stream.is_some() {
+		if self.connected {
 			let mut body = Vec::new();
 			body.push(memspace);
 
 			let buf = self.build_command(0x83, body);
 			self.send_buffer(&buf)
 		} else {
-			anyhow::bail!("No stream to send registers available");
+			anyhow::bail!("Not connected to send registers available");
 		}
 	}
 	pub fn send_advance_instructions(&mut self, count: u16) -> anyhow::Result<()> {
-		if self.stream.is_some() {
+		if self.connected {
 			let mut body = Vec::new();
 			body.push(0); // do not step over subroutines
 			body.push(((count >> 0) & 0xff) as u8);
@@ -515,7 +519,7 @@ impl FakeViceBin {
 			let buf = self.build_command(0x71, body);
 			self.send_buffer(&buf)
 		} else {
-			anyhow::bail!("No stream to send registers available");
+			anyhow::bail!("Not connected to send registers available");
 		}
 	}
 }
