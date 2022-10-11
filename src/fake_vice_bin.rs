@@ -144,6 +144,16 @@ impl FakeViceBin {
 		buffer
 	}
 
+	fn send_buffer(&mut self, buffer: &[u8]) -> anyhow::Result<()> {
+		if let Some(stream) = &mut self.stream {
+			stream.write(buffer)?;
+			self.resets_pending += 1;
+			Ok(())
+		} else {
+			anyhow::bail!("No stream when trying to send");
+		}
+	}
+
 	fn handle_response(&mut self) -> anyhow::Result<()> {
 		if let Some(response_buffer_cons) = &mut self.response_rb_cons {
 			// occupied_len
@@ -360,7 +370,12 @@ impl FakeViceBin {
 
 				if let Some(response_buffer_prod) = &mut self.response_rb_prod {
 					for b in buf.iter() {
-						response_buffer_prod.push(*b);
+						match response_buffer_prod.push(*b) {
+							Ok(()) => {},
+							Err(e) => {
+								anyhow::bail!("Error storing response {}", e);
+							},
+						}
 					}
 				}
 			}
@@ -390,9 +405,7 @@ impl FakeViceBin {
 	}
 
 	pub fn send_ping(&mut self) -> anyhow::Result<()> {
-		if let Some(stream) = &mut self.stream {
-			// :TODO: read pending -> read_to_end
-
+		if self.stream.is_some() {
 			let mut buf = Vec::new();
 
 			buf.push(0x02); // STX
@@ -411,17 +424,14 @@ impl FakeViceBin {
 			buf.push(0x81); // 0x81 -> ping
 				// 11 command body
 
-			stream.write(buf.as_slice())?;
-			Ok(())
+			self.send_buffer(&buf)
 		} else {
 			anyhow::bail!("No stream to send ping");
 		}
 	}
 
 	pub fn send_exit(&mut self) -> anyhow::Result<()> {
-		if let Some(stream) = &mut self.stream {
-			// :TODO: read pending -> read_to_end
-
+		if self.stream.is_some() {
 			let mut buf = Vec::new();
 
 			buf.push(0x02); // STX
@@ -440,8 +450,7 @@ impl FakeViceBin {
 			buf.push(0xaa); // 0xaa -> exit
 				// 11 command body
 
-			stream.write(buf.as_slice())?;
-			Ok(())
+			self.send_buffer(&buf)
 		} else {
 			anyhow::bail!("No stream to send exit");
 		}
@@ -449,17 +458,11 @@ impl FakeViceBin {
 
 	pub fn send_reset(&mut self) -> anyhow::Result<()> {
 		if self.stream.is_some() {
-			// :TODO: read pending -> read_to_end
-
 			let mut body = Vec::new();
 			body.push(0x01); // 0x01 -> hard reset
 
 			let buf = self.build_command(0xcc, body);
-			if let Some(stream) = &mut self.stream {
-				stream.write(buf.as_slice())?;
-				self.resets_pending += 1;
-			}
-			Ok(())
+			self.send_buffer(&buf)
 		} else {
 			anyhow::bail!("No stream to send reset");
 		}
@@ -486,11 +489,7 @@ impl FakeViceBin {
 			}
 
 			let buf = self.build_command(0xdd, body);
-			if let Some(stream) = &mut self.stream {
-				stream.write(buf.as_slice())?;
-				self.load_pending = true;
-			}
-			Ok(())
+			self.send_buffer(&buf)
 		} else {
 			anyhow::bail!("No stream to send load");
 		}
@@ -501,10 +500,7 @@ impl FakeViceBin {
 			body.push(memspace);
 
 			let buf = self.build_command(0x83, body);
-			if let Some(stream) = &mut self.stream {
-				stream.write(buf.as_slice())?;
-			}
-			Ok(())
+			self.send_buffer(&buf)
 		} else {
 			anyhow::bail!("No stream to send registers available");
 		}
@@ -517,10 +513,7 @@ impl FakeViceBin {
 			body.push(((count >> 1) & 0xff) as u8);
 
 			let buf = self.build_command(0x71, body);
-			if let Some(stream) = &mut self.stream {
-				stream.write(buf.as_slice())?;
-			}
-			Ok(())
+			self.send_buffer(&buf)
 		} else {
 			anyhow::bail!("No stream to send registers available");
 		}
