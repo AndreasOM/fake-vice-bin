@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use ringbuf::consumer::Consumer;
 use ringbuf::producer::Producer;
-use ringbuf::SharedRb;
+use ringbuf::HeapRb;
 
 #[derive(Debug, Default)]
 pub struct Register {
@@ -53,8 +53,8 @@ pub struct FakeViceBin {
 	program_counter: u16,
 	registers:       HashMap<u8, Register>,
 
-	response_rb_prod: Option<Producer<u8, Arc<SharedRb<u8, Vec<MaybeUninit<u8>>>>>>,
-	response_rb_cons: Option<Consumer<u8, Arc<SharedRb<u8, Vec<MaybeUninit<u8>>>>>>,
+	response_rb_prod: Option<Producer<u8, Arc<HeapRb<u8>>>>,
+	response_rb_cons: Option<Consumer<u8, Arc<HeapRb<u8>>>>,
 }
 
 impl FakeViceBin {
@@ -80,7 +80,7 @@ impl FakeViceBin {
 			Ok(stream) => {
 				stream.set_nonblocking(true)?;
 				self.stream = Some(stream);
-				let rb = SharedRb::<u8, Vec<_>>::new(64 * 1024); // this should be more than plenty, well, it's too large, but I have a plan
+				let rb = HeapRb::<u8>::new(64 * 1024); // this should be more than plenty, well, it's too large, but I have a plan
 				let (prod, cons) = rb.split();
 				self.response_rb_prod = Some(prod);
 				self.response_rb_cons = Some(cons);
