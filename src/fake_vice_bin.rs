@@ -87,7 +87,7 @@ impl FakeViceBin {
 		match TcpStream::connect(self.socket_addr) {
 			Ok(mut stream) => {
 				stream.set_nonblocking(true)?;
-				//self.stream = Some(stream);
+				//stream.set_nodelay(true)?; // maybe not
 
 				let rb = HeapRb::<u8>::new(64 * 1024); // this should be more than plenty, well, it's too large, but I have a plan
 				let (prod, cons) = rb.split();
@@ -134,6 +134,14 @@ impl FakeViceBin {
 							};
 
 							if let Some(response_rb_prod) = &mut response_rb_prod {
+								while response_rb_prod.free_len() < buf.len() {
+									// spin until there is space
+									print!(".");
+									let short_delay = std::time::Duration::from_millis(1);
+									std::thread::sleep(short_delay);
+								}
+								let l = response_rb_prod.push_slice(&buf);
+								/*
 								for b in buf.iter() {
 									match response_rb_prod.push(*b) {
 										Ok(()) => {},
@@ -142,6 +150,7 @@ impl FakeViceBin {
 										},
 									}
 								}
+								*/
 							}
 						}
 						// println!("Read {} bytes in update", self.response_buffer.len() );
@@ -551,6 +560,7 @@ impl FakeViceBin {
 		}
 	}
 	pub fn send_registers_available(&mut self, memspace: u8) -> anyhow::Result<()> {
+		println!("send_registers_available");
 		if self.connected {
 			let mut body = Vec::new();
 			body.push(memspace);

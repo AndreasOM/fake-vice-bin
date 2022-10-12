@@ -1,6 +1,24 @@
+use clap::{Parser, Subcommand};
 use fake_vice_bin::FakeViceBin;
 
-fn main() -> anyhow::Result<()> {
+use crate::script::Script;
+mod script;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+#[command(propagate_version = true)]
+struct Cli {
+	#[command(subcommand)]
+	command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+	Script { file: String },
+	Demo {},
+}
+
+fn run_demo() -> anyhow::Result<()> {
 	let mut fvb = FakeViceBin::new("127.0.0.1", 6502);
 
 	let short_delay = std::time::Duration::from_millis(5);
@@ -59,5 +77,20 @@ fn main() -> anyhow::Result<()> {
 		fvb.send_exit()?;
 		std::thread::sleep(delay);
 	}
+
 	Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+	let cli = Cli::parse();
+	match &cli.command {
+		Commands::Script { file } => {
+			let mut script = Script::new();
+			script.load(file)?;
+			println!("Script: {:#?}", &script);
+			script.run()?;
+			Ok(())
+		},
+		Commands::Demo {} => run_demo(),
+	}
 }

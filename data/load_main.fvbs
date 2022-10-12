@@ -1,0 +1,30 @@
+// just a simple example
+	connect();
+	send_registers_available(0);
+
+	sleep(0.5);
+	update();
+	send_reset();
+wait_for_reset:
+	if( is_reset_pending() )
+	{
+		sleep(0.5);
+		update();
+	}
+
+	sleep(0.5);
+	update();
+	send_exit();
+
+	sleep(0.5);
+	send_load("main.prg", true);
+	send_exit();
+
+	sleep(5.0);
+
+loop_step:
+	send_advance_instructions(1000);
+	update();
+	sleep(0.005);
+
+	jump(loop_step);

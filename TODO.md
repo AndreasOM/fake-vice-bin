@@ -2,9 +2,11 @@
 
 ## In Progress
 
+- [ ] Add comannd line interface
 
 ## TODO
 
+- [ ] Add clean shutdown of connection thread
 - [ ] Move parsing of responses to separate thread, so we can block when we need more data
 - [ ] Move header information into header struct
 
