@@ -14,7 +14,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-	Script { file: String },
+	Script {
+		file:    String,
+		#[clap(short, long)]
+		dry_run: bool,
+	},
 	Demo {},
 }
 
@@ -84,11 +88,13 @@ fn run_demo() -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 	match &cli.command {
-		Commands::Script { file } => {
+		Commands::Script { file, dry_run } => {
 			let mut script = Script::new();
 			script.load(file)?;
 			println!("Script: {:#?}", &script);
-			script.run()?;
+			if !dry_run {
+				script.run()?;
+			}
 			Ok(())
 		},
 		Commands::Demo {} => run_demo(),

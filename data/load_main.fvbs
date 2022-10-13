@@ -6,11 +6,15 @@
 	update();
 	send_reset();
 wait_for_reset:
-	if( is_reset_pending() )
-	{
-		sleep(0.5);
-		update();
-	}
+
+// :TODO: if is not handled yet
+//	if( is_reset_pending() )
+//	{
+//		sleep(0.5);
+//		update();
+//	}
+
+	block_during_reset();
 
 	sleep(0.5);
 	update();

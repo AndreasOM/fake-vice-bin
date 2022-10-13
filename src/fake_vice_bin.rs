@@ -80,6 +80,10 @@ impl FakeViceBin {
 		}
 	}
 
+	pub fn is_connected(&self) -> bool {
+		self.connected
+	}
+
 	pub fn connect(&mut self) -> anyhow::Result<()> {
 		if self.connected {
 			anyhow::bail!("Already connected!");
