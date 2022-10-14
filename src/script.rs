@@ -6,6 +6,43 @@ use std::str::FromStr;
 use fake_vice_bin::FakeViceBin;
 
 #[derive(Debug, Default)]
+enum Condition {
+	#[default]
+	None,
+	IsResetPending,
+	And {
+		left:  Box<Condition>,
+		right: Box<Condition>,
+	},
+	Or {
+		left:  Box<Condition>,
+		right: Box<Condition>,
+	},
+	Invalid {
+		condition: String,
+	},
+}
+
+impl From<&str> for Condition {
+	fn from(s: &str) -> Self {
+		let s = s.trim();
+		if let Some(s) = s.strip_prefix("is_reset_pending") {
+			let s = s.trim();
+			if let Some(s) = s.strip_prefix("(") {
+				let s = s.trim();
+				if let Some(_s) = s.strip_prefix(")") {
+					return Condition::IsResetPending;
+				}
+			}
+		}
+
+		Condition::Invalid {
+			condition: s.to_owned(),
+		}
+	}
+}
+
+#[derive(Debug, Default)]
 enum Command {
 	#[default]
 	None,
@@ -30,6 +67,10 @@ enum Command {
 	Jump {
 		target: String,
 	},
+	If {
+		condition: Condition,
+		// :TODO: we could cache the jump target here, instead of searching every time
+	},
 	Label {
 		name: String,
 	},
@@ -46,6 +87,16 @@ impl Script {
 		Default::default()
 	}
 
+	fn eval_condition(fvb: &mut FakeViceBin, condition: &Condition) -> anyhow::Result<bool> {
+		match condition {
+			Condition::IsResetPending => {
+				return Ok(fvb.is_reset_pending());
+			},
+			c => {
+				anyhow::bail!("Condition {:?} not implemented", c);
+			},
+		}
+	}
 	fn add_connect(&mut self) {
 		let c = Command::Connect;
 		self.commands.push(c);
@@ -90,10 +141,16 @@ impl Script {
 		let c = Command::Sleep { seconds };
 		self.commands.push(c);
 	}
+	fn add_if(&mut self, condition: &str) {
+		let c = Command::If {
+			condition: condition.into(),
+		};
+		self.commands.push(c);
+	}
 
 	fn add_jump(&mut self, target: &str) {
 		let c = Command::Jump {
-			target: target.to_owned(),
+			target: target.trim().to_owned(),
 		};
 		self.commands.push(c);
 	}
@@ -102,7 +159,9 @@ impl Script {
 		let c = Command::Label {
 			name: label.to_owned(),
 		};
-		self.labels.insert(label.to_owned(), self.commands.len());
+		if !["{{", "}}"].contains(&label) {
+			self.labels.insert(label.to_owned(), self.commands.len());
+		}
 		self.commands.push(c);
 	}
 	fn add_from_str(&mut self, s: &str, line_no: usize) -> anyhow::Result<()> {
@@ -110,12 +169,21 @@ impl Script {
 		if let Some((label, _)) = s.split_once(":") {
 			println!("Label >{}<", &label);
 			self.add_label(&label);
-		} else if let Some(_an_if) = s.strip_prefix("if") {
-			println!(">if< on line {} not handled yet", line_no);
+		} else if let Some(an_if) = s.strip_prefix("if") {
+			let an_if = an_if.trim();
+			if let Some(an_if) = an_if.strip_prefix("(") {
+				if let Some(condition) = an_if.strip_suffix(")") {
+					self.add_if(condition);
+				} else {
+					anyhow::bail!("Missing closing ) on if in line {}", line_no);
+				}
+			} else {
+				anyhow::bail!("Missing opening ( on if in line {}", line_no);
+			}
 		} else if let Some(_an_if) = s.strip_prefix("{") {
-			println!(">{{< on line {} not handled yet", line_no);
+			self.add_label("{{");
 		} else if let Some(_an_if) = s.strip_prefix("}") {
-			println!(">}}< on line {} not handled yet", line_no);
+			self.add_label("}}");
 		} else if let Some(cmd) = s.strip_suffix(";") {
 			if let Some(jump) = cmd.strip_prefix("jump(") {
 				if let Some(jump) = jump.strip_suffix(")") {
@@ -287,6 +355,37 @@ impl Script {
 						continue;
 					} else {
 						anyhow::bail!("Label {} not found", target);
+					}
+				},
+				Command::If { condition } => {
+					if Self::eval_condition(&mut fvb, &condition)? {
+						// nothing to do
+					} else {
+						// jump to else branch / end
+						// :TODO: implement else
+
+						let mut new_pc = pc;
+						new_pc += 1;
+						if new_pc >= self.commands.len() {
+							anyhow::bail!("Script ends after if"); // :TODO: should probably check this during parsing/verification
+						}
+						// search matching closing label '}'
+						loop {
+							let c2 = &self.commands[new_pc];
+							match c2 {
+								Command::Label { name } if name == "}}" => {
+									new_pc += 1;
+									break;
+								},
+								_ => {},
+							}
+							new_pc += 1;
+							if new_pc >= self.commands.len() {
+								anyhow::bail!("Script ends within if {{"); // :TODO: should probably check this during parsing/verification
+							}
+						}
+						println!("Skipped {:?} to {}", &c, new_pc);
+						pc = new_pc;
 					}
 				},
 				Command::Label { name: _ } => {},

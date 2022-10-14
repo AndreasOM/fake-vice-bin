@@ -8,13 +8,14 @@
 wait_for_reset:
 
 // :TODO: if is not handled yet
-//	if( is_reset_pending() )
-//	{
-//		sleep(0.5);
-//		update();
-//	}
+	if( is_reset_pending() )
+	{
+		sleep(0.5);
+		update();
+		jump( wait_for_reset );
+	}
 
-	block_during_reset();
+//	block_during_reset();
 
 	sleep(0.5);
 	update();

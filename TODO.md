@@ -12,6 +12,7 @@
 
 ## Done
 
+- [x] Add simple scripting
 
 ## Released
 
