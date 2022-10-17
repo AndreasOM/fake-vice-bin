@@ -13,6 +13,8 @@ use ringbuf::consumer::Consumer;
 use ringbuf::producer::Producer;
 use ringbuf::HeapRb;
 
+use crate::ResponseHeader;
+
 #[derive(Debug, Default)]
 pub struct Register {
 	name:  String,
@@ -268,39 +270,11 @@ impl FakeViceBin {
 				if l != 12 {
 					anyhow::bail!("Short header {} != 12", l);
 				}
-				//let header_buffer = self.response_buffer.drain(0..12).collect::<Vec<_>>();
-				let buffer = &header_buffer;
-				for b in buffer.iter() {
-					print!("{:#02x} ", b);
+				let rh: ResponseHeader = (&header_buffer).into();
+				if !rh.valid() {
+					anyhow::bail!("Invalid response header!");
 				}
-				println!("");
-				// parse update
-				let stx = buffer[0];
-				if stx != 0x02 {
-					anyhow::bail!("Response started with {}", stx);
-				}
-				let version = buffer[1];
-				if version != 0x02 {
-					anyhow::bail!("Version {} not supported", version);
-				}
-				let len = [buffer[5], buffer[4], buffer[3], buffer[2]];
-				let mut body_len = 0;
-				for b in len.iter() {
-					body_len <<= 8;
-					body_len |= *b as usize;
-				}
-				//println!("Body Length: {:?} -> {}", len, body_len);
-				let response_type = buffer[6];
-				//println!("Response type: {:#02x}", response_type);
-				let error_code = buffer[7];
-				//println!("Error code: {:#02x}", error_code);
-
-				let id = [buffer[11], buffer[10], buffer[9], buffer[8]];
-				let mut request_id = 0;
-				for b in id.iter() {
-					request_id <<= 8;
-					request_id |= *b as usize;
-				}
+				let body_len = rh.body_len() as usize;
 				let mut body_vec = Vec::with_capacity(body_len);
 				body_vec.resize(body_len, 0);
 				let mut body_buffer = &mut body_vec[0..body_len]; //body_vec.as_slice();
@@ -310,13 +284,13 @@ impl FakeViceBin {
 					std::thread::sleep(short_delay);
 				}
 				let l = response_buffer_cons.pop_slice(&mut body_buffer);
-				println!("Got {} bytes from ringbuffer for body (Response Type: {:#04x}, Error Code: {:#04x})", l, response_type, error_code);
+				println!("Got {} bytes from ringbuffer for body (Response Type: {:#04x}, Error Code: {:#04x})", l, rh.response_type(), rh.error_code());
 				if l != body_len {
 					anyhow::bail!("Short body {} != {}", l, body_len);
 				}
 
 				let buffer = &body_buffer;
-				match response_type {
+				match rh.response_type() {
 					0x31 => {
 						// registers get
 						let c = [buffer[1], buffer[0]];
@@ -432,9 +406,9 @@ impl FakeViceBin {
 						println!("Handled reset");
 						self.resets_pending -= 1;
 					},
-					o => match error_code {
+					o => match rh.error_code() {
 						0x80 => {
-							println!("Invalid command length for {:#010x}", request_id);
+							println!("Invalid command length for {:#010x}", rh.request_id());
 						},
 						ec => {
 							println!(
