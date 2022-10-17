@@ -13,6 +13,7 @@ use ringbuf::consumer::Consumer;
 use ringbuf::producer::Producer;
 use ringbuf::HeapRb;
 
+use crate::Response;
 use crate::ResponseHeader;
 
 #[derive(Debug, Default)]
@@ -289,131 +290,68 @@ impl FakeViceBin {
 					anyhow::bail!("Short body {} != {}", l, body_len);
 				}
 
-				let buffer = &body_buffer;
-				match rh.response_type() {
-					0x31 => {
-						// registers get
-						let c = [buffer[1], buffer[0]];
-						let mut count = 0;
-						for b in c.iter() {
-							count <<= 8;
-							count |= *b as u16;
-						}
-						//println!("Count {}", count);
-						let mut entry_start = 2;
-						for e in 0..count {
-							let size = buffer[entry_start];
-							let id = buffer[entry_start + 1];
-							let value = ((buffer[entry_start + 3] as u16) << 8)
-								| (buffer[entry_start + 2] as u16);
+				let r: Response = (&rh, &body_buffer[..]).into();
 
+				match r {
+					Response::RegistersGet { registers } => {
+						for (k, v) in registers {
+							let id = k;
+							let size = v.0;
+							let value = v.1;
 							let r = self
 								.registers
 								.entry(id)
 								.or_insert_with(|| Register::default());
-							println!(
-								"{:#02} | {:#04x} {:#04x} {:#06x} | {}",
-								e,
-								size,
-								id,
-								value,
-								r.name()
-							);
+							println!("{:#04x} {:#04x} {:#06x} | {}", size, id, value, r.name());
 							r.set_value(value);
-							entry_start += 4;
 						}
 					},
-					0x62 => {
-						// stopped
-						let c = [buffer[1], buffer[0]];
-						let mut pc = 0;
-						for b in c.iter() {
-							pc <<= 8;
-							pc |= *b as u16;
-						}
+					Response::Stopped { pc } => {
 						self.running = false;
 						self.program_counter = pc;
 						//println!("stopped PC {:#06x}", pc);
 					},
-					0x63 => {
-						// resumed
-						let c = [buffer[1], buffer[0]];
-						let mut pc = 0;
-						for b in c.iter() {
-							pc <<= 8;
-							pc |= *b as u16;
-						}
+					Response::Resumed { pc } => {
 						self.running = true;
 						self.program_counter = pc;
 						//println!("resumed PC {:#06x}", pc);
 					},
+					/*
 					0x71 => { // advance instructions
 					},
 					0x81 => { // ping
 					},
-					0x83 => {
-						// registers available
-						println!("Body for 0x83 - registers available");
-						for b in buffer.iter() {
-							print!("{:#02x} ", b);
-						}
-						println!("");
+					*/
+					Response::RegistersAvailable { registers } => {
+						for (k, v) in registers {
+							let id = k;
+							let r_size = v.0;
+							let name = v.1;
 
-						/*
-						byte 0-1: The count of the array items
-						byte 2+: An array with items of structure:
-
-						byte 0: Size of the item, excluding this byte
-						byte 1: ID of the register
-						byte 2: Size of the register in bits
-						byte 3: Length of name
-						byte 4+: Name
-											*/
-
-						let count = (buffer[1] as u16) << 8 | (buffer[0] as u16);
-						println!("Entry count {}", count);
-
-						let mut entry_start = 2;
-						for e in 0..count {
-							let size = buffer[entry_start] as usize;
-							let id = buffer[entry_start + 1];
-							let r_size = buffer[entry_start + 2];
-							let len = buffer[entry_start + 3] as usize;
-							let mut name = Vec::new();
-							for i in 0..=len {
-								name.push(buffer[entry_start + 3 + i])
-							}
-
-							let name = std::str::from_utf8(&name)?;
-
-							println!(
-								"{:#02} | {:#04x} {:#04x} {:#04x} -> {}",
-								e, size, id, r_size, name
-							);
+							println!("{:#04x} {:#04x} -> {}", id, r_size, name);
 							let r = self
 								.registers
 								.entry(id)
 								.or_insert_with(|| Register::default());
-							r.set_name(name);
+							r.set_name(&name);
 							r.set_size(r_size);
-							entry_start += size + 1;
 						}
 					},
-					0xaa => { // exit
-					},
-					0xcc => {
+					Response::Exit => {},
+					Response::Reset => {
 						// reset
 						println!("Handled reset");
 						self.resets_pending -= 1;
 					},
-					o => match rh.error_code() {
+					_o => match rh.error_code() {
 						0x80 => {
 							println!("Invalid command length for {:#010x}", rh.request_id());
 						},
 						ec => {
 							println!(
 								"Unhandled response type {:#04x} (error code: {:#04x})",
-								o, ec
+								rh.response_type(),
+								ec
 							);
 						},
 					},
